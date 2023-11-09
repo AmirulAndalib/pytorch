@@ -172,6 +172,11 @@ class GraphLowering(torch.fx.Interpreter):
         layout_opt=None,
         extern_node_serializer=None,
         is_inference=False,
+        is_const_graph=False,
+        original_constants=None,
+        const_output_index=None,
+        const_kernels=None,
+        const_code=None,
     ):
         super().__init__(gm)
 
@@ -180,6 +185,8 @@ class GraphLowering(torch.fx.Interpreter):
         )
         self.num_channels_last_conv = 0
         self.is_inference = is_inference
+        self.is_const_graph = is_const_graph
+        self.const_code = const_code
 
         self.extra_traceback = False  # we do our own error wrapping
         if shape_env is None:
@@ -197,7 +204,14 @@ class GraphLowering(torch.fx.Interpreter):
         self.device_idxs: Set[int] = set()
         self.cuda = False
         self.buffers: List[ir.ComputedBuffer] = []
-        self.constants: OrderedDict[str, torch.Tensor] = OrderedDict()
+        self.const_output_index: Dict[str, int] = (
+            const_output_index if const_output_index else {}
+        )
+        self.const_kernels: Set[str] = const_kernels if const_kernels else set()
+        self.constants: OrderedDict[str, torch.Tensor] = (
+            original_constants if original_constants else OrderedDict()
+        )
+        self.used_constants: Set[str] = set()
         self.constant_reprs: Dict[str, str] = {}
         self.removed_buffers: Set[str] = set()
         self.removed_inplace_buffers: Set[str] = set()
@@ -518,6 +532,7 @@ class GraphLowering(torch.fx.Interpreter):
             return name
 
         name = allocate(name)
+        self.used_constants.add(name)
 
         return TensorBox.create(
             ir.ConstantBuffer(
@@ -891,6 +906,9 @@ class GraphLowering(torch.fx.Interpreter):
                 raise CppWrapperCodeGenError(f"Unsupported input dtype {dtype}")
 
     def init_wrapper_code(self):
+        if not self.device_types:
+            for buffer in self.buffers:
+                self.device_types.add(buffer.get_device().type)
         self.cuda = "cuda" in self.device_types
         if self.cpp_wrapper:
             self.validate_can_generate_cpp_wrapper()
