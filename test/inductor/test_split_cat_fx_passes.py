@@ -1,8 +1,11 @@
 # Owner(s): ["module: inductor"]
 
+import unittest
+
 import torch
 from torch._dynamo.test_case import run_tests, TestCase
 from torch._dynamo.utils import counters
+from torch._inductor import config
 from torch.testing._internal.common_utils import IS_LINUX
 from torch.testing._internal.inductor_utils import HAS_CUDA
 
@@ -1061,6 +1064,43 @@ class TestSplitCatFxPasses(TestCase):
             self.assertEqual(
                 counters["inductor"]["stack_tahn_unbind_merged"],
                 expected_stack_tahn_unbind_merged,
+            )
+            counters.clear()
+
+    @unittest.skipIf(
+        not config.is_fbcode(), "test fb.unsqueeze_n_times only in fbcode "
+    )
+    @patch
+    def test_remove_unsqueeze_node(self):
+        def remove_unsqueeze_node(x):
+            l1_out = torch.split(x, [20, 20, 20, 20, 20, 20], 1)
+            item0 = l1_out[0]
+            item1 = l1_out[1]
+            item2 = l1_out[2]
+            item3 = l1_out[3]
+            item4 = l1_out[4]
+            item5 = l1_out[5]
+            a0 = torch.ops.fb.unsqueeze_n_times(item0, 0)
+            a1 = torch.ops.fb.unsqueeze_n_times(item1, 0)
+            a2 = torch.ops.fb.unsqueeze_n_times(item2, 0)
+            a3 = torch.ops.fb.unsqueeze_n_times(item3, 0)
+            a4 = torch.ops.fb.unsqueeze_n_times(item4, 0)
+            a5 = torch.ops.fb.unsqueeze_n_times(item5, 0)
+            return torch.cat((a0, a1, a2, a3, a4, a5), 1)
+
+        args = [
+            torch.randn(50, 120),
+        ]
+        for fn, expected_remove_unsqueeze_node in [
+            (remove_unsqueeze_node, 6),
+        ]:
+            expected = fn(*args)
+            actual = torch.compile(fn)(*args)
+
+            torch.testing.assert_close(actual, expected)
+            self.assertEqual(
+                counters["inductor"]["remove_unsqueeze"],
+                expected_remove_unsqueeze_node,
             )
             counters.clear()
 
