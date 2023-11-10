@@ -11738,6 +11738,10 @@ class TestAutogradMultipleDispatch(TestCase):
         TestFn.apply(inp, None).sum().backward()
         self.assertEqual(local.my_obj[10], 5)
 
+    def test_libkineto_profiler_initialized(self):
+        # Check that the profiler is initialized with autograd.
+        if torch._C._autograd._is_use_kineto_defined():
+            self.assertTrue(torch._C._autograd._isProfilerInitialized())
 
 # Import test cases from below autograd/ here. These are found
 # implicitly by the loader, so Flake8 thinks they are unused, hence
