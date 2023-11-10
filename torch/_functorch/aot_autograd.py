@@ -41,7 +41,7 @@ from torch._decomp.decompositions_for_rng import PhiloxStateTracker, rng_decompo
 from . import config
 from .partitioners import default_partition
 from torch._guards import TracingContext, DuplicateInputs, Source
-
+from torch.utils.weak import WeakIdRef
 
 original_zip = zip
 
@@ -1127,7 +1127,7 @@ def run_functionalized_fw_and_collect_metadata(
                 mutates_metadata=mutates_metadata,
                 mutations_hidden_from_autograd=mutations_hidden_from_autograd,
                 mutates_storage_metadata=mutates_storage_metadata,
-                requires_grad=isinstance(f_arg, torch.Tensor) and f_arg.requires_grad
+                requires_grad=isinstance(f_arg, torch.Tensor) and f_arg.requires_grad,
             ))
 
         # If a function involves creating a tensor, and returning a view of it, such that its _base is the intermediate,
@@ -3137,7 +3137,20 @@ def create_runtime_wrapper(
                     if trace_joint:
                         assert isinstance(updated_inpt, TensorAlias)
                         updated_inpt = updated_inpt.alias
-                    original_inpt.set_(updated_inpt)
+                    try:
+                        original_inpt.set_(updated_inpt)
+                    except RuntimeError:
+                        # This happens when the sizes of the two tensors do not match, probably
+                        # because we saw .data
+                        # while we could call
+                        # original_inpt.data = updated_inpt
+                        # That's a little gross, let's use the "safe" pattern instead
+                        with torch.no_grad():
+                            version_counter = original_inpt._version
+                            original_inpt.set_(updated_inpt)
+                            if version_counter > 0:
+                                version_counter = version_counter - 1
+                            torch._C._autograd._unsafe_set_version_counter(original_inpt, version_counter)
                     continue
                 if meta.mutates_metadata and not meta.mutates_data:
                     if trace_joint:
@@ -4296,14 +4309,16 @@ def create_aot_dispatcher_function(
                     if all(isinstance(getattr(x, attr), FakeTensor) for attr in attrs):
                         assert all(getattr(x, attr).fake_mode is fake_mode for attr in attrs)
                         return x
-                # TODO: Ensure that this codepath is never exercised from
-                # Dynamo
-                if (
-                    idx < aot_config.num_params_buffers
-                    and config.static_weight_shapes
-                ):
-                    return fake_mode.from_tensor(x, static_shapes=True)
-                return fake_mode.from_tensor(x, static_shapes=False)
+                static_shapes = idx < aot_config.num_params_buffers and config.static_weight_shapes
+                widr = WeakIdRef(x)
+                tc = torch._guards.TracingContext.get()
+                # TODO(voz): Doc goes here
+                if tc and widr in tc.weak_tensor_ref_to_fakification_policy and not static_shapes:
+                    policy = tc.weak_tensor_ref_to_fakification_policy[widr]
+                    out = fake_mode.from_tensor(x, static_shapes=static_shapes, ignore_subclass=policy.ignore_subclass, dynamic_dims=policy.dynamic_dims, constraint_dims=policy.constraint_dims, source=policy.source)
+                else:
+                    out = fake_mode.from_tensor(x, static_shapes=static_shapes)
+                return out
 
             return [convert(idx, x) for idx, x in enumerate(flat_args)]
 

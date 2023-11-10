@@ -1630,6 +1630,8 @@ class ShapeEnv:
         self.fx_node_cache: Dict[Tuple[Callable, Tuple[Any, ...]], torch.fx.Node] = {}
         self.source_to_symbol: Dict[str, sympy.Symbol] = {}
 
+        self.source_to_symint_node_cache : Dict[TensorPropertySource, SymInt] = {}
+
         from torch.fx.experimental.validator import translation_validation_enabled
         self._translation_validation_enabled = translation_validation_enabled()
 
@@ -2088,6 +2090,10 @@ class ShapeEnv:
             hint: Optional[int],
             source: Optional[Source] = None,
     ):
+        source_name = source.name() if source else None
+        if source_name and source_name in self.source_to_symint_node_cache:
+            return self.source_to_symint_node_cache[source_name]
+
         if self._translation_validation_enabled and source is not None:
             # Create a new symbol for this source.
             symbol = self._create_symbol_for_source(source)
@@ -2101,11 +2107,16 @@ class ShapeEnv:
         else:
             fx_node = None
 
+        out = None
         if isinstance(sym, sympy.Integer):
             if hint is not None:
                 assert int(sym) == hint
-            return int(sym)
-        return SymInt(SymNode(sym, self, int, hint, fx_node=fx_node))
+            out = int(sym)
+        else:
+            out = SymInt(SymNode(sym, self, int, hint, fx_node=fx_node))
+        if source_name:
+            self.source_to_symint_node_cache[source_name] = out
+        return out
 
     @record_shapeenv_event()
     def create_unspecified_symint_and_symbol(self, value, source, dynamic_dim):
@@ -2444,6 +2455,7 @@ class ShapeEnv:
 
         symbol_to_source = collections.defaultdict(list)
         symbol_to_constraints = collections.defaultdict(set)
+
         constraint_violations : List[Tuple[bool, Callable[[], str]]] = []
 
         def record_constraint_violation(warn_only, debug_name, msg, hint=None):
