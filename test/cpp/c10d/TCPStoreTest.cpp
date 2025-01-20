@@ -2,9 +2,7 @@
 #include "StoreTestCommon.hpp"
 
 #include <cstdlib>
-#include <future>
-#include <iostream>
-#include <system_error>
+#include <string>
 #include <thread>
 
 #include <gtest/gtest.h>
@@ -28,7 +26,7 @@ c10::intrusive_ptr<c10d::TCPStore> _createServer(
           /* waitWorkers */ false,
           /* timeout */ std::chrono::seconds(timeout),
           /* multiTenant */ false,
-          /* masterListenFd */ c10::nullopt,
+          /* masterListenFd */ std::nullopt,
           /* useLibUV*/ useLibUV});
 }
 
@@ -103,33 +101,32 @@ void testHelper(bool useLibUV, const std::string& prefix = "") {
       std::to_string(numThreads * numIterations + 1);
 
   for (const auto i : c10::irange(numThreads)) {
-    threads.emplace_back(
-        std::thread([=, &sem1, &sem2, &clientStores, &expectedCounterRes] {
-          for (C10_UNUSED const auto j : c10::irange(numIterations)) {
-            clientStores[i]->add("counter", 1);
-          }
-          // Let each thread set and get key on its client store
-          std::string key = "thread_" + std::to_string(i);
-          for (const auto j : c10::irange(numIterations)) {
-            std::string val = "thread_val_" + std::to_string(j);
-            c10d::test::set(*clientStores[i], key, val);
-            c10d::test::check(*clientStores[i], key, val);
-          }
+    threads.emplace_back([=, &sem1, &sem2, &clientStores, &expectedCounterRes] {
+      for ([[maybe_unused]] const auto j : c10::irange(numIterations)) {
+        clientStores[i]->add("counter", 1);
+      }
+      // Let each thread set and get key on its client store
+      std::string key = "thread_" + std::to_string(i);
+      for (const auto j : c10::irange(numIterations)) {
+        std::string val = "thread_val_" + std::to_string(j);
+        c10d::test::set(*clientStores[i], key, val);
+        c10d::test::check(*clientStores[i], key, val);
+      }
 
-          sem1.post();
-          sem2.wait();
-          // Check the counter results
-          c10d::test::check(*clientStores[i], "counter", expectedCounterRes);
-          // Now check other threads' written data
-          for (const auto j : c10::irange(numThreads)) {
-            if (j == i) {
-              continue;
-            }
-            std::string key = "thread_" + std::to_string(i);
-            std::string val = "thread_val_" + std::to_string(numIterations - 1);
-            c10d::test::check(*clientStores[i], key, val);
-          }
-        }));
+      sem1.post();
+      sem2.wait();
+      // Check the counter results
+      c10d::test::check(*clientStores[i], "counter", expectedCounterRes);
+      // Now check other threads' written data
+      for (const auto j : c10::irange(numThreads)) {
+        if (j == i) {
+          continue;
+        }
+        std::string key = "thread_" + std::to_string(i);
+        std::string val = "thread_val_" + std::to_string(numIterations - 1);
+        c10d::test::check(*clientStores[i], key, val);
+      }
+    });
   }
 
   sem1.wait(numThreads);
@@ -165,11 +162,11 @@ TEST(TCPStoreTest, testHelperUV) {
 }
 
 TEST(TCPStoreTest, testHelperPrefix) {
-  testHelper(false, "testPrefix");
+  testHelper(false, "testPrefixNoUV");
 }
 
 TEST(TCPStoreTest, testHelperPrefixUV) {
-  testHelper(true, "testPrefix");
+  testHelper(true, "testPrefixUV");
 }
 
 TEST(TCPStoreTest, testCleanShutdown) {
@@ -177,11 +174,12 @@ TEST(TCPStoreTest, testCleanShutdown) {
 
   auto serverTCPStore = std::make_unique<c10d::TCPStore>(
       "127.0.0.1",
-      0,
-      numWorkers,
-      true,
-      std::chrono::seconds(defaultTimeout),
-      /* wait */ false);
+      c10d::TCPStoreOptions{
+          /* port */ 0,
+          /* isServer */ true,
+          numWorkers,
+          /* waitWorkers */ false,
+          /* timeout */ std::chrono::seconds(defaultTimeout)});
   c10d::test::set(*serverTCPStore, "key", "val");
 
   auto clientTCPStore = c10::make_intrusive<c10d::TCPStore>(
@@ -200,6 +198,50 @@ TEST(TCPStoreTest, testCleanShutdown) {
 
   // start server shutdown during a client request
   serverTCPStore = nullptr;
+
+  clientThread.join();
+}
+
+TEST(TCPStoreTest, testLibUVPartialRead) {
+  int numWorkers = 2; // thread 0 creates both server and client
+
+  // server part
+  c10d::TCPStoreOptions server_opts{
+      0,
+      true, // is master
+      numWorkers,
+      false, // don't wait otherwise client thread won't spawn
+      std::chrono::seconds(defaultTimeout)};
+  server_opts.useLibUV = true;
+
+  auto serverTCPStore =
+      std::make_unique<c10d::TCPStore>("127.0.0.1", server_opts);
+
+  // client part
+  c10d::TCPStoreOptions client_opts{
+      serverTCPStore->getPort(),
+      false, // is master
+      numWorkers,
+      false, // wait workers
+      std::chrono::seconds(defaultTimeout)};
+  client_opts.useLibUV = true;
+  auto clientTCPStore =
+      c10::make_intrusive<c10d::TCPStore>("127.0.0.1", client_opts);
+  auto clientThread = std::thread([&clientTCPStore] {
+    std::string keyPrefix(
+        "/default_pg/0//b7dc24de75e482ba2ceb9f9ee20732c25c0166d8//cuda//");
+    std::string value("v");
+    std::vector<uint8_t> valueBuf(value.begin(), value.end());
+
+    // split store->set(key, valueBuf) into two requests
+    for (int i = 0; i < 10; ++i) {
+      std::string key = keyPrefix + std::to_string(i);
+      clientTCPStore->_splitSet(key, valueBuf);
+
+      // check the result on server
+      c10d::test::check(*clientTCPStore, key, "v");
+    }
+  });
 
   clientThread.join();
 }

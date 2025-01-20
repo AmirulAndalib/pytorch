@@ -1,22 +1,18 @@
-from collections import defaultdict
-
-from itertools import chain
-
+# mypy: allow-untyped-defs
+import operator
 import pickle
-
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    List,
-    no_type_check,
-    Sequence,
-)
+from collections import defaultdict
+from collections.abc import Sequence
+from itertools import chain
+from typing import Any, Callable, no_type_check, TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from torch.utils.hooks import RemovableHandle
 from torch.utils._python_dispatch import TorchDispatchMode
+
+
+if TYPE_CHECKING:
+    from torch.utils.hooks import RemovableHandle
 
 
 BYTES_PER_MB = 1024 * 1024.0
@@ -77,12 +73,12 @@ class MemoryTracker:
 
     def __init__(self) -> None:
         torch._C._log_api_usage_once("torch.distributed.memory_tracker")
-        self._hooks: List[RemovableHandle] = []
-        self._operator_names: Dict[str, int] = defaultdict(int)
-        self.memories_allocated: Dict[int, Dict[str, float]] = defaultdict()
-        self.memories_active: Dict[int, Dict[str, float]] = defaultdict()
-        self.memories_reserved: Dict[int, Dict[str, float]] = defaultdict()
-        self._markers: Dict[str, int] = defaultdict(int)
+        self._hooks: list[RemovableHandle] = []
+        self._operator_names: dict[str, int] = defaultdict(int)
+        self.memories_allocated: dict[int, dict[str, float]] = defaultdict()
+        self.memories_active: dict[int, dict[str, float]] = defaultdict()
+        self.memories_reserved: dict[int, dict[str, float]] = defaultdict()
+        self._markers: dict[str, int] = defaultdict(int)
         self._cur_module_name: str = ""
         self._op_index: int = 0
         self._num_cuda_retries: int = 0
@@ -138,7 +134,7 @@ class MemoryTracker:
 
         The number of the top operators can be configured.
         """
-        op_diff: Dict[str, float] = defaultdict(float)
+        op_diff: dict[str, float] = defaultdict(float)
         op_name, previous_allocated_memory = self.memories_allocated[0]
         for i in range(1, self._op_index):
             op_name, current_allocated_memory = self.memories_allocated[i]
@@ -148,7 +144,7 @@ class MemoryTracker:
         print("------------------------------------------------")
         print(f"The number of cuda retries are: {self._num_cuda_retries}")
         print(f"Top {top} ops that generates memory are:")
-        for k, v in sorted(op_diff.items(), key=lambda item: item[1], reverse=True)[
+        for k, v in sorted(op_diff.items(), key=operator.itemgetter(1), reverse=True)[
             :top
         ]:
             print(f"{k}: {v}MB")
@@ -229,6 +225,7 @@ class MemoryTracker:
 
     def _create_pre_forward_hook(self, name: str) -> Callable:
         """Prefix operator name with current module and 'forward', and insert 'fw_start' marker at forward pass start."""
+
         def _pre_forward_hook(module: nn.Module, inputs: Any) -> None:
             self._cur_module_name = f"{name}.forward"
             if (

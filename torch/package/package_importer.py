@@ -1,14 +1,26 @@
+# mypy: allow-untyped-defs
 import builtins
 import importlib
 import importlib.machinery
 import inspect
 import io
 import linecache
-import os.path
+import os
+import sys
 import types
 from contextlib import contextmanager
-from pathlib import Path
-from typing import Any, BinaryIO, Callable, cast, Dict, Iterable, List, Optional, Union
+from typing import (
+    Any,
+    BinaryIO,
+    Callable,
+    cast,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    TYPE_CHECKING,
+    Union,
+)
 from weakref import WeakValueDictionary
 
 import torch
@@ -25,8 +37,11 @@ from ._importlib import (
 from ._mangling import demangle, PackageMangler
 from ._package_unpickler import PackageUnpickler
 from .file_structure_representation import _create_directory_from_file_list, Directory
-from .glob_group import GlobPattern
 from .importer import Importer
+
+
+if TYPE_CHECKING:
+    from .glob_group import GlobPattern
 
 __all__ = ["PackageImporter"]
 
@@ -43,6 +58,18 @@ IMPLICIT_IMPORT_ALLOWLIST: Iterable[str] = [
     # don't extern builtins. Here we import it here by default.
     "builtins",
 ]
+
+
+# Compatibility name mapping to facilitate upgrade of external modules.
+# The primary motivation is to enable Numpy upgrade that many modules
+# depend on. The latest release of Numpy removed `numpy.str` and
+# `numpy.bool` breaking unpickling for many modules.
+EXTERN_IMPORT_COMPAT_NAME_MAPPING: Dict[str, Dict[str, Any]] = {
+    "numpy": {
+        "str": str,
+        "bool": bool,
+    },
+}
 
 
 class PackageImporter(Importer):
@@ -67,7 +94,7 @@ class PackageImporter(Importer):
 
     def __init__(
         self,
-        file_or_buffer: Union[str, torch._C.PyTorchFileReader, Path, BinaryIO],
+        file_or_buffer: Union[str, torch._C.PyTorchFileReader, os.PathLike, BinaryIO],
         module_allowed: Callable[[str], bool] = lambda module_name: True,
     ):
         """Open ``file_or_buffer`` for importing. This checks that the imported package only requires modules
@@ -89,8 +116,8 @@ class PackageImporter(Importer):
         if isinstance(file_or_buffer, torch._C.PyTorchFileReader):
             self.filename = "<pytorch_file_reader>"
             self.zip_reader = file_or_buffer
-        elif isinstance(file_or_buffer, (Path, str)):
-            self.filename = str(file_or_buffer)
+        elif isinstance(file_or_buffer, (os.PathLike, str)):
+            self.filename = os.fspath(file_or_buffer)
             if not os.path.isdir(self.filename):
                 self.zip_reader = torch._C.PyTorchFileReader(self.filename)
             else:
@@ -233,7 +260,10 @@ class PackageImporter(Importer):
 
             if typename == "storage":
                 storage_type, key, location, size = data
-                dtype = storage_type.dtype
+                if storage_type is torch.UntypedStorage:
+                    dtype = torch.uint8
+                else:
+                    dtype = storage_type.dtype
 
                 if key not in loaded_storages:
                     load_tensor(
@@ -396,6 +426,11 @@ class PackageImporter(Importer):
             cur = cur.children[atom]
             if isinstance(cur, _ExternNode):
                 module = self.modules[name] = importlib.import_module(name)
+
+                if compat_mapping := EXTERN_IMPORT_COMPAT_NAME_MAPPING.get(name):
+                    for old_name, new_name in compat_mapping.items():
+                        module.__dict__.setdefault(old_name, new_name)
+
                 return module
         return self._make_module(name, cur.source_file, isinstance(cur, _PackageNode), parent)  # type: ignore[attr-defined]
 
@@ -432,7 +467,6 @@ class PackageImporter(Importer):
 
     # note: copied from cpython's import code, with call to create module replaced with _make_module
     def _do_find_and_load(self, name):
-        path = None
         parent = name.rpartition(".")[0]
         module_name_no_parent = name.rpartition(".")[-1]
         if parent:
@@ -444,7 +478,7 @@ class PackageImporter(Importer):
             parent_module = self.modules[parent]
 
             try:
-                path = parent_module.__path__  # type: ignore[attr-defined]
+                parent_module.__path__  # type: ignore[attr-defined]
 
             except AttributeError:
                 # when we attempt to import a package only containing pybinded files,
@@ -496,8 +530,9 @@ class PackageImporter(Importer):
         if name == "os":
             self.modules["os.path"] = cast(Any, module).path
         elif name == "typing":
-            self.modules["typing.io"] = cast(Any, module).io
-            self.modules["typing.re"] = cast(Any, module).re
+            if sys.version_info < (3, 13):
+                self.modules["typing.io"] = cast(Any, module).io
+                self.modules["typing.re"] = cast(Any, module).re
 
         return module
 

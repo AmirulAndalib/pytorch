@@ -1,7 +1,8 @@
+# mypy: allow-untyped-defs
 import functools
 import logging
 from enum import auto, Enum
-from typing import Any, Callable, Dict, List, no_type_check, Optional, Set, Tuple
+from typing import Any, Callable, no_type_check, Optional
 
 import torch
 import torch.distributed as dist
@@ -38,7 +39,8 @@ from torch.distributed.utils import (
 )
 from torch.utils import _pytree as pytree
 
-log = logging.getLogger(__name__)
+
+logger = logging.getLogger(__name__)
 
 # Do not include "process_group" to enable hybrid shard and MoE cases
 HOMOGENEOUS_ATTR_NAMES = (
@@ -55,7 +57,7 @@ class _PrefetchMode(Enum):
 
 def _get_fsdp_root_states_with_modules(
     module: nn.Module,
-) -> Tuple[List[_FSDPState], List[nn.Module]]:
+) -> tuple[list[_FSDPState], list[nn.Module]]:
     """
     Returns a tuple containing:
     1. A list of the root ``_FSDPState`` instances in the module tree rooted at
@@ -68,9 +70,9 @@ def _get_fsdp_root_states_with_modules(
     must call :func:`_is_fsdp_root` to force a lazy initialization to determine
     the FSDP root in case lazy initialization has not yet happened.
     """
-    fsdp_root_states: List[_FSDPState] = []
-    fsdp_root_modules: List[nn.Module] = []
-    visited_fsdp_states: Set[_FSDPState] = set()
+    fsdp_root_states: list[_FSDPState] = []
+    fsdp_root_modules: list[nn.Module] = []
+    visited_fsdp_states: set[_FSDPState] = set()
     # NOTE: This function assumes that `module.modules()` proceeds top-down.
     for submodule in module.modules():
         optional_state = _get_module_fsdp_state(submodule)
@@ -85,7 +87,7 @@ def _get_fsdp_root_states_with_modules(
     return fsdp_root_states, fsdp_root_modules
 
 
-def _get_fsdp_root_states(module: nn.Module) -> List[_FSDPState]:
+def _get_fsdp_root_states(module: nn.Module) -> list[_FSDPState]:
     """See :func:`_get_fsdp_root_states_with_modules`."""
     fsdp_root_states, _ = _get_fsdp_root_states_with_modules(module)
     return fsdp_root_states
@@ -102,38 +104,6 @@ def _is_fsdp_root(state: _FSDPState, module: nn.Module) -> bool:
     _lazy_init(state, module)
     assert state._is_root is not None  # mypy
     return state._is_root
-
-
-@no_type_check
-def _validate_and_get_hybrid_shard_state(root_module: nn.Module) -> None:
-    """
-    Precondition: ``root_module`` is a ``FullyShardedDataParallel`` instance.
-
-    This checks that all instances using a hybrid sharding strategy have the
-    same intra- and inter-node process groups.
-    """
-    intra_node_pgs: Set[dist.ProcessGroup] = set()
-    inter_node_pgs: Set[dist.ProcessGroup] = set()
-    for fsdp_state in traversal_utils._get_fsdp_states(root_module):
-        # TODO: Change this to handle's sharding strategy if we deprecate
-        # `ShardingStrategy` internally.
-        # https://github.com/pytorch/pytorch/issues/90857
-        if fsdp_state.sharding_strategy in HYBRID_SHARDING_STRATEGIES:
-            intra_node_pgs.add(fsdp_state.process_group)
-            inter_node_pgs.add(fsdp_state._inter_node_pg)
-    if len(intra_node_pgs) == 0 and len(inter_node_pgs) == 0:
-        # No instances use a hybrid sharding strategy
-        return
-    error_prefix = "At least one instance uses a hybrid sharding strategy but has no "
-    if len(intra_node_pgs) > 0 and len(inter_node_pgs) == 0:
-        raise AssertionError(error_prefix + "inter-node process group set")
-    if len(intra_node_pgs) == 0 and len(inter_node_pgs) > 0:
-        raise AssertionError(error_prefix + "intra-node process group set")
-    error_prefix = "Some instances use a hybrid sharding strategy, but "
-    if len(intra_node_pgs) != 1:
-        raise ValueError(error_prefix + "intra-node process groups do not match")
-    if len(inter_node_pgs) != 1:
-        raise ValueError(error_prefix + "inter-node process groups do not match")
 
 
 @no_type_check
@@ -208,8 +178,7 @@ def _share_state_and_init_handle_attrs(
     handle = root_state._handle
     if handle:
         handle.init_flat_param_attributes()
-    _validate_and_get_hybrid_shard_state(root_module)
-    attr_name_to_values: Dict[str, Set[Any]] = {}
+    attr_name_to_values: dict[str, set[Any]] = {}
     for attr_name in HOMOGENEOUS_ATTR_NAMES:
         attr_name_to_values[attr_name] = set()
     root_state._all_handles = root_state._exec_order_data.all_handles  # share reference
@@ -250,6 +219,8 @@ def _share_state_and_init_handle_attrs(
         fsdp_state._default_stream = root_state._default_stream
         fsdp_state._exec_order_data = root_state._exec_order_data
         fsdp_state._free_event_queue = root_state._free_event_queue
+        if fsdp_state._fsdp_extension is not None:
+            fsdp_state._fsdp_extension.compute_stream = root_state._default_stream
         handle = fsdp_state._handle
         if handle:
             handle.init_flat_param_attributes()
@@ -279,6 +250,10 @@ def _init_streams(
     high_priority = -1 if state.limit_all_gathers and uses_hybrid_sharding else 0
     # Default stream for computation
     state._default_stream = state._device_handle.current_stream()
+    if state._fsdp_extension is not None:
+        # set the compute stream to the FSDP extension
+        state._fsdp_extension.compute_stream = state._default_stream
+
     # Stream for unshard logic, including allocating the all-gather destination
     # tensors and the all-gathers themselves
     state._unshard_stream = state._device_handle.Stream(priority=high_priority)
@@ -371,9 +346,9 @@ def _pre_forward(
     handle: Optional[FlatParamHandle],
     unshard_fn: Callable,
     module: nn.Module,
-    args: Tuple[Any, ...],
-    kwargs: Dict[str, Any],
-) -> Tuple[Tuple[Any, ...], Dict[str, Any]]:
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
     """
     Runs the pre-forward logic. This includes an opportunity to unshard
     currently sharded parameters such as those for the current forward and
@@ -441,7 +416,14 @@ def _pre_forward_unshard(
     if not handle._prefetched:
         _unshard(state, handle, state._unshard_stream, state._pre_unshard_stream)
     handle._needs_pre_forward_unshard = False
-    state._device_handle.current_stream().wait_stream(state._unshard_stream)
+    # Don't wait during trace
+    if not torch.distributed._functional_collectives.is_torchdynamo_compiling():
+        current_stream = state._device_handle.current_stream()
+        if state._unshard_event is not None:
+            current_stream.wait_event(state._unshard_event)
+            state._unshard_event = None
+        else:
+            current_stream.wait_stream(state._unshard_stream)
     with torch.profiler.record_function(
         "FullyShardedDataParallel._pre_forward_prefetch"
     ):
@@ -552,7 +534,13 @@ def _root_pre_forward(
         if handle:
             should_cast_buffers_to_full_prec = handle._force_full_precision
         else:
-            should_cast_buffers_to_full_prec = True
+            # If the root has no handle (no managed parameters), then we fall
+            # back to checking if any child wants to force full precision as a
+            # workaround
+            handles = traversal_utils._get_fsdp_handles(module)
+            should_cast_buffers_to_full_prec = any(
+                handle._force_full_precision for handle in handles
+            )
 
         if should_cast_buffers_to_full_prec:
             _cast_buffers_to_dtype_and_device(
@@ -586,10 +574,11 @@ def _root_pre_forward(
             state._needs_buffer_dtype_restore_check = False
 
         if state.forward_prefetch:
-            handles = []
-            for fsdp_state in state._all_fsdp_states:
-                if fsdp_state._handle:
-                    handles.append(fsdp_state._handle)
+            handles = [
+                fsdp_state._handle
+                for fsdp_state in state._all_fsdp_states
+                if fsdp_state._handle
+            ]
             for handle in handles:
                 handle._needs_pre_forward_unshard = True
                 handle._prefetched = False
@@ -616,7 +605,7 @@ def _root_pre_forward(
 @no_type_check
 def _root_cast_forward_input(
     state: _FSDPState, module: torch.nn.Module, args, kwargs
-) -> Tuple[Any, Any]:
+) -> tuple[Any, Any]:
     if state._handle:
         force_full_precision = not state._handle._force_full_precision
     else:
@@ -638,6 +627,7 @@ def _pre_backward_hook(
     state: _FSDPState,
     module: nn.Module,
     handle: FlatParamHandle,
+    grad,
     *unused: Any,
 ) -> Any:
     """
@@ -649,8 +639,12 @@ def _pre_backward_hook(
     """
     # Only run the pre-backward hook once per group of handles involved in the
     # same module forward computation
-    if handle and handle._ran_pre_backward_hook:
-        return
+    if (
+        handle
+        and hasattr(handle, "_ran_pre_backward_hook")
+        and handle._ran_pre_backward_hook
+    ):
+        return grad
 
     with torch.profiler.record_function("FullyShardedDataParallel._pre_backward_hook"):
         # Queue the post-backward callback once for the root FSDP instance to
@@ -669,7 +663,7 @@ def _pre_backward_hook(
         # per-handle in the pre-backward hook, so we can return early here if
         # there are no handles.
         if not handle:
-            return
+            return grad
         handle._training_state = HandleTrainingState.BACKWARD_PRE
 
         if handle._needs_pre_backward_unshard:
@@ -682,7 +676,9 @@ def _pre_backward_hook(
                     state._unshard_stream,
                     state._pre_unshard_stream,
                 )
-            state._device_handle.current_stream().wait_stream(state._unshard_stream)
+            # Don't wait during trace
+            if not torch.distributed._functional_collectives.is_torchdynamo_compiling():
+                state._device_handle.current_stream().wait_stream(state._unshard_stream)
 
         # Set this to `False` to ensure that a mistargeted prefetch does not
         # actually unshard these handles
@@ -693,6 +689,7 @@ def _pre_backward_hook(
             _prefetch_handle(state, handle, _PrefetchMode.BACKWARD)
         handle.prepare_gradient_for_backward()
         handle._ran_pre_backward_hook = True
+        return grad
 
 
 @no_type_check
@@ -700,6 +697,7 @@ def _pre_backward_hook(
 def _post_backward_hook(
     state: _FSDPState,
     handle: FlatParamHandle,
+    flat_param,
     *unused: Any,
 ):
     """
@@ -714,7 +712,7 @@ def _post_backward_hook(
     - Otherwise, the ``_saved_grad_shard`` attribute is the reduced sharded
     gradient (accumulating with any existing gradient).
     """
-    _log_post_backward_hook(state, handle, log)
+    _log_post_backward_hook(state, handle, logger)
     flat_param = handle.flat_param
     flat_param._post_backward_called = True
     with torch.autograd.profiler.record_function(
@@ -745,7 +743,10 @@ def _post_backward_hook(
 
         # Wait for all ops in the current stream (e.g. gradient computation) to
         # finish before reduce-scattering the gradient
-        state._post_backward_stream.wait_stream(state._device_handle.current_stream())
+        if not torch.distributed._functional_collectives.is_torchdynamo_compiling():
+            state._post_backward_stream.wait_stream(
+                state._device_handle.current_stream()
+            )
 
         with state._device_handle.stream(state._post_backward_stream):
             autograd_computed_grad = flat_param.grad.data
@@ -767,6 +768,22 @@ def _post_backward_hook(
             _no_dispatch_record_stream(
                 autograd_computed_grad, state._post_backward_stream
             )
+
+
+def _post_backward_reshard_only_hook(
+    state: _FSDPState,
+    handle: FlatParamHandle,
+    *unused: Any,
+) -> None:
+    with torch.profiler.record_function(
+        "FullyShardedDataParallel._post_backward_hook_reshard_only"
+    ):
+        # `_pre_backward_hook` may not get executed
+        # if forward output does not require grad
+        # overwrite IDLE state for post-backward prefetching
+        state.training_state = TrainingState.FORWARD_BACKWARD
+        handle._training_state = HandleTrainingState.BACKWARD_POST
+        _post_backward_reshard(state, handle)
 
 
 def _post_backward_reshard(
@@ -840,7 +857,9 @@ def _reduce_grad(state: _FSDPState, handle: FlatParamHandle) -> None:
             group=pg,
         )
         if uses_hybrid_sharded_strategy:
-            state._all_reduce_stream.wait_stream(state._post_backward_stream)
+            # Don't wait during trace
+            if not torch.distributed._functional_collectives.is_torchdynamo_compiling():
+                state._all_reduce_stream.wait_stream(state._post_backward_stream)
             with state._device_handle.stream(state._all_reduce_stream):
                 # Since the new sharded gradient is produced in the post-
                 # backward stream and consumed in the all-reduce stream,
@@ -866,7 +885,7 @@ def _reduce_grad(state: _FSDPState, handle: FlatParamHandle) -> None:
 @no_type_check
 def _get_reduce_scatter_tensors(
     state: _FSDPState, unsharded_grad: torch.Tensor
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Returns the input and output tensors to reduce-scatter, respectively.
     """
@@ -1379,7 +1398,9 @@ def _register_pre_backward_hooks(
     def _register_hook(t: torch.Tensor) -> torch.Tensor:
         if t.requires_grad:
             t.register_hook(
-                functools.partial(_pre_backward_hook, state, module, handle)
+                torch.utils.hooks.unserializable_hook(
+                    functools.partial(_pre_backward_hook, state, module, handle)
+                )
             )
             if handle:
                 handle._needs_pre_backward_unshard = True
@@ -1447,8 +1468,8 @@ def _register_post_backward_hook(
 def _register_post_backward_reshard_only_hook(
     state: _FSDPState,
     handle: Optional[FlatParamHandle],
-    args: Tuple[Any, ...],
-    kwargs: Dict[str, Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
 ) -> None:
     """
     Registers post-backward hooks to reshard flat parameters that do not
@@ -1462,7 +1483,7 @@ def _register_post_backward_reshard_only_hook(
         return
     # Construct `inp_tensors` lazily to avoid CPU overhead in typical case
     # where each flat parameter requires gradient
-    inp_tensors: Optional[List[torch.Tensor]] = None
+    inp_tensors: Optional[list[torch.Tensor]] = None
     if not handle:
         return
     flat_param = handle.flat_param
@@ -1481,7 +1502,7 @@ def _register_post_backward_reshard_only_hook(
         ]
     assert inp_tensors is not None  # mypy
     hook_handle = register_multi_grad_hook(
-        inp_tensors, functools.partial(_post_backward_reshard, state, handle)
+        inp_tensors, functools.partial(_post_backward_reshard_only_hook, state, handle)
     )
     if torch.distributed._functional_collectives.is_torchdynamo_compiling():
         flat_param._post_backward_hook_handle = hook_handle  # type: ignore[attr-defined, assignment]
@@ -1505,10 +1526,12 @@ def _register_post_backward_final_callback(
     if state._post_backward_callback_queued:
         return
     _assert_in_training_states(state, [TrainingState.IDLE])
-    state._post_backward_callback_queued = True
-    Variable._execution_engine.queue_callback(
-        functools.partial(_post_backward_final_callback, state, module)
-    )
+    # Trace does not need this callback
+    if not torch.distributed._functional_collectives.is_torchdynamo_compiling():
+        state._post_backward_callback_queued = True
+        Variable._execution_engine.queue_callback(
+            functools.partial(_post_backward_final_callback, state, module)
+        )
 
 
 def _wait_for_computation_stream(
@@ -1521,6 +1544,9 @@ def _wait_for_computation_stream(
     For example, this should be called in the FSDP root's pre-forward to
     respect optimizer step computation.
     """
+    # Tracing does not need to wait
+    if torch.distributed._functional_collectives.is_torchdynamo_compiling():
+        return
     unshard_stream.wait_stream(computation_stream)  # type: ignore[attr-defined]
     # Having the pre-all-gather stream wait for the current stream even if we
     # do not leverage the pre-all-gather stream is tolerable since this only
@@ -1529,7 +1555,7 @@ def _wait_for_computation_stream(
 
 
 def _reset_flat_param_grad_info_if_needed(
-    handles: List[FlatParamHandle],
+    handles: list[FlatParamHandle],
 ):
     """
     Clears the original parameters' gradients if needed. This method's CPU
@@ -1547,7 +1573,7 @@ def _reset_flat_param_grad_info_if_needed(
 def _get_buffers_and_dtypes_for_computation(
     state: _FSDPState,
     root_module: nn.Module,
-) -> Tuple[List[torch.Tensor], List[Optional[torch.dtype]]]:
+) -> tuple[list[torch.Tensor], list[Optional[torch.dtype]]]:
     """
     Returns all buffers in the module tree rooted at ``root_module`` and a
     corresponding list of the buffer dtypes for computation. Each buffer dtype
@@ -1555,9 +1581,9 @@ def _get_buffers_and_dtypes_for_computation(
     low precision dtype otherwise.
     """
     _p_assert(state._is_root, "Expects the root to cast buffers")
-    buffers: List[torch.Tensor] = []
-    buffer_dtypes: List[Optional[torch.dtype]] = []
-    visited_buffers: Set[torch.Tensor] = set()
+    buffers: list[torch.Tensor] = []
+    buffer_dtypes: list[Optional[torch.dtype]] = []
+    visited_buffers: set[torch.Tensor] = set()
     # Traverse the FSDP states bottom-up so that we prefer the owning FSDP
     # instance's mixed precision setting for each buffer
     fsdp_states, fsdp_modules = traversal_utils._get_fsdp_states_with_modules(
@@ -1579,12 +1605,12 @@ def _get_buffers_and_dtypes_for_computation(
 @no_type_check
 def _get_orig_buffer_dtypes(
     state: _FSDPState,
-    buffer_names: List[str],
-) -> List[torch.dtype]:
+    buffer_names: list[str],
+) -> list[torch.dtype]:
     """
     Returns the original buffer types of the given buffer names.
     """
-    buffer_dtypes: List[torch.dtype] = []
+    buffer_dtypes: list[torch.dtype] = []
     for buffer_name in buffer_names:
         _p_assert(
             buffer_name in state._buffer_name_to_orig_dtype,
@@ -1597,8 +1623,8 @@ def _get_orig_buffer_dtypes(
 
 
 def _cast_buffers_to_dtype_and_device(
-    buffers: List[torch.Tensor],
-    buffer_dtypes: List[Optional[torch.dtype]],
+    buffers: list[torch.Tensor],
+    buffer_dtypes: list[Optional[torch.dtype]],
     device: torch.device,
 ) -> None:
     """

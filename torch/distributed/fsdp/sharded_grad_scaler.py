@@ -1,21 +1,31 @@
+# mypy: allow-untyped-defs
 import logging
 from collections import abc, defaultdict
-from typing import Any, Dict, Iterable, List, Optional, overload, Sequence, Tuple, Union
+from collections.abc import Iterable
+from typing import Any, Optional, overload, Union
 
 import torch
 import torch.distributed as dist
-from torch.cuda.amp.grad_scaler import _MultiDeviceReplicator, GradScaler, OptState
+from torch.amp.grad_scaler import _MultiDeviceReplicator, GradScaler, OptState
 from torch.distributed.distributed_c10d import ProcessGroup
 
-log = logging.getLogger(__name__)
+
+logger = logging.getLogger(__name__)
 
 
-def _refresh_per_optimizer_state() -> Dict[str, Any]:
+def _refresh_per_optimizer_state() -> dict[str, Any]:
     return {"stage": OptState.READY, "found_inf_per_device": {}}
 
 
 def _is_supported_device(tensor: torch.Tensor) -> bool:
-    return tensor.is_cuda or tensor.device.type in ("xla", "cpu")
+    return tensor.is_cuda or tensor.device.type in (
+        "xla",
+        "cpu",
+        "hpu",
+        "mtia",
+        "xpu",
+        torch._C._get_privateuse1_backend_name(),
+    )
 
 
 class _GeneralMultiDeviceReplicator(_MultiDeviceReplicator):
@@ -27,7 +37,7 @@ class _GeneralMultiDeviceReplicator(_MultiDeviceReplicator):
     def __init__(self, master_tensor: torch.Tensor) -> None:
         assert _is_supported_device(master_tensor)
         self.master = master_tensor
-        self._per_device_tensors: Dict[torch.device, torch.Tensor] = {}
+        self._per_device_tensors: dict[torch.device, torch.Tensor] = {}
 
 
 class ShardedGradScaler(GradScaler):
@@ -81,6 +91,7 @@ class ShardedGradScaler(GradScaler):
 
     def __init__(
         self,
+        device: str = "cuda",
         init_scale: float = 2.0**16,
         backoff_factor: float = 0.5,
         growth_factor: float = 2.0,
@@ -89,6 +100,7 @@ class ShardedGradScaler(GradScaler):
         process_group: Optional[ProcessGroup] = dist.group.WORLD,
     ) -> None:
         super().__init__(
+            device,
             init_scale=init_scale,
             backoff_factor=backoff_factor,
             growth_factor=growth_factor,
@@ -104,11 +116,11 @@ class ShardedGradScaler(GradScaler):
         ...
 
     @overload
-    def scale(self, outputs: List[torch.Tensor]) -> List[torch.Tensor]:
+    def scale(self, outputs: list[torch.Tensor]) -> list[torch.Tensor]:
         ...
 
     @overload
-    def scale(self, outputs: Tuple[torch.Tensor, ...]) -> Tuple[torch.Tensor, ...]:
+    def scale(self, outputs: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
         ...
 
     @overload
@@ -134,7 +146,7 @@ class ShardedGradScaler(GradScaler):
             # format (fp16, bf16) and so the scaled loss should be of the same dtype.
             return scaled_output.type(outputs.dtype)
 
-        stash: List[_GeneralMultiDeviceReplicator] = []
+        stash: list[_GeneralMultiDeviceReplicator] = []
 
         def apply_scale(val: Union[torch.Tensor, Iterable[torch.Tensor]]):
             if isinstance(val, torch.Tensor):
@@ -158,43 +170,13 @@ class ShardedGradScaler(GradScaler):
 
         return apply_scale(outputs)
 
-    def _foreach_non_finite_check_and_unscale_cpu_(
-        self,
-        grads: Sequence[torch.Tensor],
-        found_inf: torch.Tensor,
-        inv_scale: torch.Tensor,
-    ) -> None:
-        if len(grads) == 0:
-            return
-        assert inv_scale.numel() == 1, "inv_scale must be a 1-element tensor."
-        assert found_inf.numel() == 1, "found_inf must be a 1-element tensor."
-
-        for grad in grads:
-            if grad.device.type != "cpu":
-                log.error(
-                    "tensor device is %s but was expected to be ``cpu``",
-                    grad.device,
-                )
-                raise ValueError(
-                    "Gradients were found on a non-CPU device when"
-                    " expected to be on CPU."
-                )
-            if (
-                torch.isinf(grad).any().item() is True
-                or torch.isnan(grad).any().item() is True
-            ):
-                found_inf.data = torch.tensor([1.0])
-                break
-            else:
-                grad.data *= inv_scale.item()
-
     def _unscale_grads_(
         self,
         optimizer: torch.optim.Optimizer,
         inv_scale: torch.Tensor,
         found_inf: torch.Tensor,
         allow_fp16: bool = True,
-    ) -> Dict[torch.device, torch.Tensor]:
+    ) -> dict[torch.device, torch.Tensor]:
         per_device_inv_scale = _GeneralMultiDeviceReplicator(inv_scale)
         per_device_found_inf = _GeneralMultiDeviceReplicator(found_inf)
 
@@ -231,18 +213,11 @@ class ShardedGradScaler(GradScaler):
 
             for device, per_dtype_grads in per_device_and_dtype_grads.items():
                 for grads in per_dtype_grads.values():
-                    if grads[0].device.type == "cpu":
-                        self._foreach_non_finite_check_and_unscale_cpu_(
-                            grads,
-                            per_device_found_inf.get(device),
-                            per_device_inv_scale.get(device),
-                        )
-                    else:
-                        torch._amp_foreach_non_finite_check_and_unscale_(
-                            grads,
-                            per_device_found_inf.get(device),
-                            per_device_inv_scale.get(device),
-                        )
+                    torch._amp_foreach_non_finite_check_and_unscale_(
+                        grads,
+                        per_device_found_inf.get(device),
+                        per_device_inv_scale.get(device),
+                    )
         # There exist contexts (e.g. w/ `use_orig_params=True`) wherein some
         # ranks may have no (non-zero sized) parameter shards, necessitating the
         # initialization of `per_device_found_inf._per_device_tensors` here
@@ -280,27 +255,28 @@ class ShardedGradScaler(GradScaler):
 
         # Synchronize the detected inf across the ranks
         optimizer_state = self._per_optimizer_states[id(optimizer)]
-        future_handles = []
+        works = []
+        found_inf_on_cpus = []
+        found_inf_on_devices = []
 
-        for v in optimizer_state["found_inf_per_device"].values():
-            if v.device.type == "cpu":
-                v_on_cuda = v.cuda()
-                future_handles.append(
+        for found_inf in optimizer_state["found_inf_per_device"].values():
+            if self._device != "cpu" and found_inf.device.type == "cpu":
+                found_inf_on_cpus.append(found_inf)
+                found_inf_on_device = found_inf.to(self._device)
+                found_inf_on_devices.append(found_inf_on_device)
+                works.append(
                     dist.all_reduce(
-                        v_on_cuda, async_op=True, group=self.process_group
-                    ).get_future()
+                        found_inf_on_device, async_op=True, group=self.process_group
+                    )
                 )
-                v.copy_(v_on_cuda.cpu())
             else:
-                future_handles.append(
-                    dist.all_reduce(
-                        v, async_op=True, group=self.process_group
-                    ).get_future()
+                works.append(
+                    dist.all_reduce(found_inf, async_op=True, group=self.process_group)
                 )
-
-        # Make sure that the calls are done before moving out.
-        if future_handles:
-            torch.futures.wait_all(future_handles)
+        for work in works:
+            work.wait()
+        if found_inf_on_cpus:
+            torch._foreach_copy_(found_inf_on_cpus, found_inf_on_devices)
 
     def _amp_update_scale_cpu_(self, found_inf: torch.Tensor) -> None:
         """
@@ -331,7 +307,7 @@ class ShardedGradScaler(GradScaler):
         ``new_scale`` was a tensor, later in-place changes to that tensor will not further
         affect the scale GradScaler uses internally.)
         Args:
-            new_scale (float or :class:`torch.cuda.FloatTensor`, optional, default=None):  New scale factor.
+            new_scale (float or :class:`torch.Tensor`, optional, default=None):  New scale factor.
         .. warning::
             :meth:`update` should only be called at the end of the iteration, after ``scaler.step(optimizer)`` has
             been invoked for all optimizers used this iteration.
@@ -347,8 +323,9 @@ class ShardedGradScaler(GradScaler):
             if isinstance(new_scale, float):
                 self._scale.fill_(new_scale)  # type: ignore[union-attr]
             else:
-                reason = "new_scale should be a float or a 1-element torch.cuda.FloatTensor with requires_grad=False."
-                assert isinstance(new_scale, torch.cuda.FloatTensor), reason  # type: ignore[attr-defined]
+                reason = "new_scale should be a float or a 1-element torch.cuda.FloatTensor or \
+                    torch.FloatTensor with requires_grad=False."
+                assert new_scale.device.type == self._device, reason
                 assert new_scale.numel() == 1, reason
                 assert new_scale.requires_grad is False, reason
                 self._scale.copy_(new_scale)  # type: ignore[union-attr]

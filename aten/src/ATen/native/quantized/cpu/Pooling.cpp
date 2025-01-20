@@ -5,6 +5,7 @@
 #include <ATen/Parallel.h>
 #include <torch/library.h>
 #include <ATen/native/Pool.h>
+#include <ATen/native/MaxPooling.h>
 #include <ATen/quantized/Quantizer.h>
 #include <ATen/native/quantized/cpu/QuantizedOps.h>
 #include <ATen/native/quantized/cpu/init_qnnpack.h>
@@ -28,8 +29,7 @@
 #include <algorithm>
 #include <vector>
 
-namespace at {
-namespace native {
+namespace at::native {
 
 DEFINE_DISPATCH(qmaxpool_2d_nhwc_stub);
 DEFINE_DISPATCH(qmaxpool_3d_nthwc_stub);
@@ -271,7 +271,7 @@ Tensor q_maxpool_2d(
             .memory_format(qx.suggest_memory_format()),
           qx.q_scale(),
           qx.q_zero_point(),
-          c10::nullopt);
+          std::nullopt);
     }
     qmaxpool_2d_nhwc_stub(qx.device().type(), qx, iC, iH, iW, oH, oW, kH, kW, sH, sW, pH, pW, dH, dW, qy);
     return qy;
@@ -421,7 +421,7 @@ Tensor q_maxpool_3d(
           .memory_format(qx.suggest_memory_format()),
         qx.q_scale(),
         qx.q_zero_point(),
-        c10::nullopt);
+        std::nullopt);
     qmaxpool_3d_nthwc_stub(qx.device().type(), qx, iC, iT, iH, iW, oT, oH, oW, kT, kH, kW, sT, sH, sW, pT, pH, pW, dT, dH, dW, qy);
     return qy;
   } else {
@@ -477,6 +477,8 @@ void check_maxpool2d_params(
               "Expected 1d or 2d padding, got ", padding.size());
   TORCH_CHECK(dilation.size() == 1 || dilation.size() == 2,
               "Expected 1d or 2d dilation, got ", dilation.size());
+  TORCH_CHECK(dilation.allMatch([](const auto& ele) { return ele >= 1L; }),
+              "Expected dilation >= 1");
 }
 
 void check_maxpool3d_params(
@@ -489,6 +491,8 @@ void check_maxpool3d_params(
               "Expected no strides or 3d strides, got", stride.size());
   TORCH_CHECK(padding.size() == 3, "Expected 3d padding, got ", padding.size());
   TORCH_CHECK(dilation.size() == 3, "Expected 1d or 3d dilation, got ", dilation.size());
+  TORCH_CHECK(dilation.allMatch([](const auto& ele) { return ele >= 1L; }),
+              "Expected dilation >= 1");
 }
 
 #ifdef USE_PYTORCH_QNNPACK
@@ -702,6 +706,7 @@ Tensor quantized_max_pool1d(
     IntArrayRef padding,
     IntArrayRef dilation,
     bool ceil_mode) {
+  check_max_pool1d(qx, kernel_size, stride, padding, dilation, ceil_mode);
   // (C, L) -> (C, 1, L) => kSqueezeDim = 1
   // (N, C, L) -> (N, C, 1, L) => kSqueezeDim = 2
   const int32_t kSqueezeDim = qx.dim() - 1;
@@ -757,5 +762,4 @@ TORCH_LIBRARY_IMPL(quantized, CPU, m) {
 }
 
 } // namespace
-} // namespace native
-} // namespace at
+} // namespace at::native

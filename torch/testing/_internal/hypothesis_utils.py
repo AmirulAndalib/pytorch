@@ -1,3 +1,5 @@
+# mypy: ignore-errors
+
 from collections import defaultdict
 from collections.abc import Iterable
 import numpy as np
@@ -34,7 +36,7 @@ _ENFORCED_ZERO_POINT = defaultdict(lambda: None, {
 })
 
 def _get_valid_min_max(qparams):
-    scale, zero_point, quantized_type = qparams
+    scale, zero_point, _quantized_type = qparams
     adjustment = 1 + torch.finfo(torch.float).eps
     _long_type_info = torch.iinfo(torch.long)
     long_min, long_max = _long_type_info.min / adjustment, _long_type_info.max / adjustment
@@ -159,10 +161,10 @@ Example:
 @st.composite
 def array_shapes(draw, min_dims=1, max_dims=None, min_side=1, max_side=None, max_numel=None):
     """Return a strategy for array shapes (tuples of int >= 1)."""
-    assert(min_dims < 32)
+    assert min_dims < 32
     if max_dims is None:
         max_dims = min(min_dims + 2, 32)
-    assert(max_dims < 32)
+    assert max_dims < 32
     if max_side is None:
         max_side = min_side + 5
     candidate = st.lists(st.integers(min_side, max_side), min_size=min_dims, max_size=max_dims)
@@ -314,13 +316,9 @@ def tensor_conv(
     if isinstance(spatial_dim, Iterable):
         spatial_dim = draw(st.sampled_from(spatial_dim))
 
-    feature_map_shape = []
-    for i in range(spatial_dim):
-        feature_map_shape.append(draw(st.integers(*feature_map_range)))
+    feature_map_shape = [draw(st.integers(*feature_map_range)) for _ in range(spatial_dim)]
 
-    kernels = []
-    for i in range(spatial_dim):
-        kernels.append(draw(st.integers(*kernel_range)))
+    kernels = [draw(st.integers(*kernel_range)) for _ in range(spatial_dim)]
 
     tr = False
     weight_shape = (output_channels, input_channels_per_group) + tuple(kernels)
@@ -334,7 +332,7 @@ def tensor_conv(
     # Resolve the tensors
     if qparams is not None:
         if isinstance(qparams, (list, tuple)):
-            assert(len(qparams) == 3), "Need 3 qparams for X, w, b"
+            assert len(qparams) == 3, "Need 3 qparams for X, w, b"
         else:
             qparams = [qparams] * 3
 

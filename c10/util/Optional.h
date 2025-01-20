@@ -7,15 +7,23 @@
 // Macros.h is not needed, but it does namespace shenanigans that lots
 // of downstream code seems to rely on. Feel free to remove it and fix
 // up builds.
-#include <c10/macros/Macros.h>
-#include <c10/util/Metaprogramming.h>
 
 namespace c10 {
+
+#if !defined(FBCODE_CAFFE2) && !defined(C10_NODEPRECATED)
+// NOLINTNEXTLINE(misc-unused-using-decls)
 using std::bad_optional_access;
+// NOLINTNEXTLINE(misc-unused-using-decls)
 using std::make_optional;
+// NOLINTNEXTLINE(misc-unused-using-decls)
 using std::nullopt;
+// NOLINTNEXTLINE(misc-unused-using-decls)
 using std::nullopt_t;
+// NOLINTNEXTLINE(misc-unused-using-decls)
 using std::optional;
+#endif
+
+#if !defined(FBCODE_CAFFE2) && !defined(C10_NODEPRECATED)
 
 namespace detail_ {
 // the call to convert<A>(b) has return type A and converts b to type A iff b
@@ -26,20 +34,27 @@ constexpr U convert(U v) {
 }
 } // namespace detail_
 template <class T, class F>
-constexpr T value_or_else(const optional<T>& v, F&& func) {
+[[deprecated(
+    "Please use std::optional::value_or instead of c10::value_or_else")]] constexpr T
+value_or_else(const std::optional<T>& v, F&& func) {
   static_assert(
-      std::is_convertible<typename std::invoke_result_t<F>, T>::value,
+      std::is_convertible_v<typename std::invoke_result_t<F>, T>,
       "func parameters must be a callable that returns a type convertible to the value stored in the optional");
   return v.has_value() ? *v : detail_::convert<T>(std::forward<F>(func)());
 }
 
 template <class T, class F>
-constexpr T value_or_else(optional<T>&& v, F&& func) {
+[[deprecated(
+    "Please use std::optional::value_or instead of c10::value_or_else")]] constexpr T
+value_or_else(std::optional<T>&& v, F&& func) {
   static_assert(
-      std::is_convertible<typename std::invoke_result_t<F>, T>::value,
+      std::is_convertible_v<typename std::invoke_result_t<F>, T>,
       "func parameters must be a callable that returns a type convertible to the value stored in the optional");
   return v.has_value() ? constexpr_move(std::move(v).contained_val())
                        : detail_::convert<T>(std::forward<F>(func)());
 }
+
+#endif
+
 } // namespace c10
 #endif // C10_UTIL_OPTIONAL_H_

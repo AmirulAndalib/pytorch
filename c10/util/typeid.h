@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -10,15 +11,17 @@
 #include <type_traits>
 #include <vector>
 
+#include <c10/macros/Export.h>
 #include <c10/macros/Macros.h>
 #include <c10/util/Exception.h>
+#include <c10/util/Half.h>
 #include <c10/util/IdWrapper.h>
 #include <c10/util/TypeIndex.h>
 #include <c10/util/TypeTraits.h>
+#include <c10/util/irange.h>
 #include <c10/util/string_view.h>
 
 #include <c10/core/ScalarType.h>
-#include <c10/util/irange.h>
 
 /*
  * TypeIdentifier is a small type containing an id.
@@ -40,12 +43,11 @@
 // later.  So the namespace is not fixed at the moment.
 
 // Make at::Half a fundamental type.
-namespace c10 {
-namespace guts {
+
+namespace c10::guts {
 template <>
 struct is_fundamental<at::Half> : std::true_type {};
-} // namespace guts
-} // namespace c10
+} // namespace c10::guts
 
 namespace caffe2 {
 
@@ -69,7 +71,7 @@ class C10_API TypeIdentifier final
    * is generated during run-time. Do NOT serialize the id for storage.
    */
   template <typename T>
-  static C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA TypeIdentifier Get() noexcept {
+  static constexpr TypeIdentifier Get() noexcept {
     return TypeIdentifier(c10::util::get_type_index<T>());
   }
 
@@ -133,7 +135,7 @@ struct TypeMetaData final {
       PlacementDelete* placementDelete,
       Delete* deleteFn,
       TypeIdentifier id,
-      c10::string_view name) noexcept
+      std::string_view name) noexcept
       : itemsize_(itemsize),
         new_(newFn),
         placementNew_(placementNew),
@@ -150,7 +152,7 @@ struct TypeMetaData final {
   PlacementDelete* placementDelete_;
   Delete* delete_;
   TypeIdentifier id_;
-  c10::string_view name_;
+  std::string_view name_;
 };
 
 // Mechanism for throwing errors which can't be prevented at compile time
@@ -326,6 +328,7 @@ class C10_API TypeMeta final {
    * type, use TypeMeta::Make<T>().
    */
   TypeMeta() noexcept;
+  ~TypeMeta() = default;
 
   /**
    * Copy constructor.
@@ -337,6 +340,7 @@ class C10_API TypeMeta final {
    */
   TypeMeta& operator=(const TypeMeta& src) noexcept = default;
 
+  TypeMeta& operator=(TypeMeta&& src) noexcept = default;
   TypeMeta(TypeMeta&& rhs) noexcept = default;
 
   inline TypeMeta& operator=(ScalarType scalar_type) noexcept {
@@ -407,7 +411,7 @@ class C10_API TypeMeta final {
   /**
    * Returns a printable name for the type.
    */
-  c10::string_view name() const noexcept {
+  std::string_view name() const noexcept {
     return data().name_;
   }
 
@@ -421,12 +425,12 @@ class C10_API TypeMeta final {
   // Below are static functions that can be called by passing a specific type.
 
   template <class T>
-  static C10_HOST_CONSTEXPR_EXCEPT_WIN_CUDA TypeIdentifier Id() noexcept {
+  static constexpr TypeIdentifier Id() noexcept {
     return TypeIdentifier::Get<T>();
   }
 
   template <class T>
-  static c10::string_view TypeName() noexcept {
+  static std::string_view TypeName() noexcept {
     return c10::util::get_fully_qualified_type_name<T>();
   }
 
@@ -668,7 +672,6 @@ inline std::ostream& operator<<(
   }
 
 CAFFE_DECLARE_KNOWN_TYPE(std::string, std_string)
-CAFFE_DECLARE_KNOWN_TYPE(uint16_t, uint16_t)
 CAFFE_DECLARE_KNOWN_TYPE(char, char)
 CAFFE_DECLARE_KNOWN_TYPE(std::unique_ptr<std::mutex>, std_unique_ptr_std_mutex)
 CAFFE_DECLARE_KNOWN_TYPE(
@@ -702,7 +705,7 @@ using _guard_long_unique = std::conditional_t<
 
 CAFFE_DECLARE_KNOWN_TYPE(
     detail::_guard_long_unique<long>,
-    detail_guard_long_unique_long);
+    detail_guard_long_unique_long)
 CAFFE_DECLARE_KNOWN_TYPE(
     detail::_guard_long_unique<std::vector<long>>,
     detail_guard_long_unique_std_vector_long)

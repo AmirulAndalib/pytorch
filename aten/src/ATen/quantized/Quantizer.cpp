@@ -115,12 +115,13 @@ inline Tensor new_qtensor(
   // TODO: why isn't this just using GetAllocator
   if (device.is_cuda()) {
     allocator = at::detail::getCUDAHooks().getCUDADeviceAllocator();
+  } else if (at::accelerator::isAccelerator(device.type())) {
+    TORCH_INTERNAL_ASSERT(!device.is_cuda(), "CUDA should already get the allocator.");
+    allocator = at::GetAllocator(device.type());
   } else if (device.is_cpu()) {
     allocator = at::getCPUAllocator();
   } else if (device.is_meta()) {
     allocator = GetAllocator(kMeta);
-  } else if (device.is_privateuseone()) {
-    allocator = GetAllocator(kPrivateUse1);
   } else {
     TORCH_INTERNAL_ASSERT(0, "unrecognized device for new_qtensor: ", device);
   }
@@ -146,12 +147,13 @@ inline Tensor new_qtensor(
   auto scalar_type = typeMetaToScalarType(dtype);
   int64_t size_bytes = get_sub_byte_tensor_size(sizes, dtype.itemsize(), scalar_type);
 
-  auto storage = c10::make_intrusive<StorageImpl>(
+  auto storage = make_storage_impl(
       StorageImpl::use_byte_size_t(),
       size_bytes,
       allocator->allocate(size_bytes),
       allocator,
-      /*resizable=*/true);
+      /*resizable=*/true,
+      device);
   auto tensor = detail::make_tensor<QTensorImpl>(
       storage, at::DispatchKeySet(tensorDispatchKey), dtype, quantizer);
   get_qtensorimpl(tensor)->set_sizes_contiguous(sizes);
@@ -312,8 +314,6 @@ Tensor& PerChannelAffineFloatQParamsQuantizer::dequantize_out(
   return rtensor;
 }
 
-Quantizer::~Quantizer() = default;
-
 C10_EXPORT void set_quantizer_(const Tensor& self, ConstQuantizerPtr quantizer) {
   get_qtensorimpl(self)->set_quantizer_(quantizer);
 }
@@ -366,9 +366,7 @@ Tensor from_blob_quantized_per_tensor_affine(
   const auto ndim = sizes.size();
   if (ndim > 0) {
     strides.resize(ndim);
-    // NOLINTNEXTLINE
-    int32_t i = ndim - 1;
-    // NOLINTNEXTLINE
+    int64_t i = static_cast<int64_t>(ndim - 1);
     strides[i] = 1;
     while (--i >= 0) {
       strides[i] = sizes[i + 1] * strides[i + 1];

@@ -24,8 +24,7 @@
 #include <utility>
 #include <vector>
 
-namespace torch {
-namespace autograd {
+namespace torch::autograd {
 
 struct Edge;
 struct FunctionPostHook;
@@ -64,7 +63,7 @@ TORCH_API std::shared_ptr<Node> get_current_node();
 // or more input `Variable`s and producing zero or more output `Variable`s. All
 // functions in PyTorch's autograd machinery derive from this class and
 // override its `apply` method. Instances of such subclasses will then be
-// invokeable via the call operator.
+// invokable via the call operator.
 //
 //                    Nodes in the Autograd Graph
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -240,13 +239,34 @@ struct TORCH_API Node : std::enable_shared_from_this<Node> {
    * elements are on different devices (across multiple GPUs, for example)
    * they may have different streams.
    */
-  c10::optional<c10::Stream> stream(const c10::DeviceType device_type) {
+  std::optional<c10::Stream> stream() {
+    auto opt_device_type = at::getAccelerator();
+    if (!opt_device_type.has_value()) {
+      return std::nullopt;
+    }
     for (const auto& metadata : input_metadata_) {
-      if (metadata.device().type() == device_type)
+      if (metadata.device().type() == opt_device_type.value())
         return metadata.stream();
     }
 
-    return c10::nullopt;
+    return std::nullopt;
+  }
+
+  // Used by the engine to determine what device thread to run on
+  at::Device device() {
+    // Since we pick the first non-CPU tensor, this won't work with
+    // mixed device-type operations (e.g., an op that is both CUDA
+    // and XLA).  This is *incredibly* unlikely, so we don't worry
+    // about it.
+    for (const auto& metadata : input_metadata_) {
+      auto device = metadata.device();
+      if (device.type() != at::kCPU) {
+        return device;
+      }
+    }
+    // Only report to the CPU thread if there really were no tensors
+    // from other devices.
+    return at::kCPU;
   }
 
   void clear_input_metadata() {
@@ -700,7 +720,7 @@ struct MakeNextFunctionList : IterArgs<MakeNextFunctionList> {
   void operator()(const Variable* variable) {
     operator()(*variable);
   }
-  void operator()(const c10::optional<Variable>& variable) {
+  void operator()(const std::optional<Variable>& variable) {
     if (variable.has_value()) {
       operator()(*variable);
     } else {
@@ -746,7 +766,7 @@ edge_list collect_next_edges(Variables&&... variables) {
 }
 
 struct TypeAndSize {
-  TypeAndSize() : options(at::TensorOptions()) {}
+  TypeAndSize() = default;
   /* implicit */
   TypeAndSize(const at::Tensor& t)
       : sym_sizes(t.sym_sizes().vec()), options(t.options()) {}
@@ -757,5 +777,4 @@ struct TypeAndSize {
   at::TensorOptions options;
 };
 
-} // namespace autograd
-} // namespace torch
+} // namespace torch::autograd

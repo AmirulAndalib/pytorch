@@ -1,8 +1,19 @@
-from torch import Tensor
-from .optimizer import (_capturable_doc, _differentiable_doc,
-                        _foreach_doc, _fused_doc, _maximize_doc, ParamsT)
+# mypy: allow-untyped-defs
 from typing import List, Optional, Tuple, Union
+
+from torch import Tensor
+
 from .adam import Adam, adam
+from .optimizer import (
+    _capturable_doc,
+    _differentiable_doc,
+    _foreach_doc,
+    _fused_doc,
+    _maximize_doc,
+    _params_doc,
+    ParamsT,
+)
+
 
 __all__ = ["AdamW", "adamw"]
 
@@ -12,7 +23,7 @@ class AdamW(Adam):
         self,
         params: ParamsT,
         lr: Union[float, Tensor] = 1e-3,
-        betas: Tuple[float, float] = (0.9, 0.999),
+        betas: Tuple[Union[float, Tensor], Union[float, Tensor]] = (0.9, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 1e-2,
         amsgrad: bool = False,
@@ -23,11 +34,32 @@ class AdamW(Adam):
         differentiable: bool = False,
         fused: Optional[bool] = None,
     ):
-        super().__init__(params, lr, betas, eps, weight_decay, amsgrad, foreach=foreach,
-                         maximize=maximize, capturable=capturable, differentiable=differentiable,
-                         fused=fused, decoupled_weight_decay=True)
+        super().__init__(
+            params,
+            lr,
+            betas,
+            eps,
+            weight_decay,
+            amsgrad,
+            foreach=foreach,
+            maximize=maximize,
+            capturable=capturable,
+            differentiable=differentiable,
+            fused=fused,
+            decoupled_weight_decay=True,
+        )
 
-AdamW.__doc__ = r"""Implements AdamW algorithm.
+    # Preserve decoupled_weight_decay from AdamW for backwards compatibility. The following
+    # guarantees that decoupled_weight_decay will always be True for loading any state into
+    # AdamW
+    def __setstate__(self, state):
+        super().__setstate__(state)
+        for group in self.param_groups:
+            group["decoupled_weight_decay"] = True
+
+
+AdamW.__doc__ = (
+    r"""Implements AdamW algorithm, where weight decay does not accumulate in the momentum nor variance.
 
     .. math::
        \begin{aligned}
@@ -38,26 +70,24 @@ AdamW.__doc__ = r"""Implements AdamW algorithm.
             &\hspace{13mm}      \lambda \text{(weight decay)},  \: \textit{amsgrad},
                 \: \textit{maximize}                                                             \\
             &\textbf{initialize} : m_0 \leftarrow 0 \text{ (first moment)}, v_0 \leftarrow 0
-                \text{ ( second moment)}, \: \widehat{v_0}^{max}\leftarrow 0              \\[-1.ex]
+                \text{ ( second moment)}, \: v_0^{max}\leftarrow 0                        \\[-1.ex]
             &\rule{110mm}{0.4pt}                                                                 \\
             &\textbf{for} \: t=1 \: \textbf{to} \: \ldots \: \textbf{do}                         \\
 
             &\hspace{5mm}\textbf{if} \: \textit{maximize}:                                       \\
-            &\hspace{10mm}g_t           \leftarrow   -\nabla_{\theta} f_t (\theta_{t-1})          \\
+            &\hspace{10mm}g_t           \leftarrow   -\nabla_{\theta} f_t (\theta_{t-1})         \\
             &\hspace{5mm}\textbf{else}                                                           \\
-            &\hspace{10mm}g_t           \leftarrow   \nabla_{\theta} f_t (\theta_{t-1})           \\
+            &\hspace{10mm}g_t           \leftarrow   \nabla_{\theta} f_t (\theta_{t-1})          \\
             &\hspace{5mm} \theta_t \leftarrow \theta_{t-1} - \gamma \lambda \theta_{t-1}         \\
             &\hspace{5mm}m_t           \leftarrow   \beta_1 m_{t-1} + (1 - \beta_1) g_t          \\
             &\hspace{5mm}v_t           \leftarrow   \beta_2 v_{t-1} + (1-\beta_2) g^2_t          \\
             &\hspace{5mm}\widehat{m_t} \leftarrow   m_t/\big(1-\beta_1^t \big)                   \\
-            &\hspace{5mm}\widehat{v_t} \leftarrow   v_t/\big(1-\beta_2^t \big)                   \\
             &\hspace{5mm}\textbf{if} \: amsgrad                                                  \\
-            &\hspace{10mm}\widehat{v_t}^{max} \leftarrow \mathrm{max}(\widehat{v_t}^{max},
-                \widehat{v_t})                                                                   \\
-            &\hspace{10mm}\theta_t \leftarrow \theta_t - \gamma \widehat{m_t}/
-                \big(\sqrt{\widehat{v_t}^{max}} + \epsilon \big)                                 \\
+            &\hspace{10mm} v_t^{max} \leftarrow \mathrm{max}(v_{t-1}^{max},v_t)                  \\
+            &\hspace{10mm}\widehat{v_t} \leftarrow v_t^{max}/\big(1-\beta_2^t \big)              \\
             &\hspace{5mm}\textbf{else}                                                           \\
-            &\hspace{10mm}\theta_t \leftarrow \theta_t - \gamma \widehat{m_t}/
+            &\hspace{10mm}\widehat{v_t} \leftarrow   v_t/\big(1-\beta_2^t \big)                  \\
+            &\hspace{5mm}\theta_t \leftarrow \theta_t - \gamma \widehat{m_t}/
                 \big(\sqrt{\widehat{v_t}} + \epsilon \big)                                       \\
             &\rule{110mm}{0.4pt}                                                          \\[-1.ex]
             &\bf{return} \:  \theta_t                                                     \\[-1.ex]
@@ -65,10 +95,10 @@ AdamW.__doc__ = r"""Implements AdamW algorithm.
        \end{aligned}
 
     For further details regarding the algorithm we refer to `Decoupled Weight Decay Regularization`_.
-    """ + fr"""
+    """
+    + rf"""
     Args:
-        params (iterable): iterable of parameters to optimize or dicts defining
-            parameter groups
+        {_params_doc}
         lr (float, Tensor, optional): learning rate (default: 1e-3). A tensor LR
             is not yet supported for all our implementations. Please use a float
             LR if you are not also specifying fused=True or capturable=True.
@@ -85,14 +115,18 @@ AdamW.__doc__ = r"""Implements AdamW algorithm.
         {_capturable_doc}
         {_differentiable_doc}
         {_fused_doc}
+    .. Note::
+        A prototype implementation of Adam and AdamW for MPS supports `torch.float32` and `torch.float16`.
     .. _Decoupled Weight Decay Regularization:
         https://arxiv.org/abs/1711.05101
     .. _On the Convergence of Adam and Beyond:
         https://openreview.net/forum?id=ryQu7f-RZ
 
     """
+)
 
 
+# @_disable_dynamo_if_unsupported logic occurs in the decorator that's applied to F.adam
 def adamw(
     params: List[Tensor],
     grads: List[Tensor],
@@ -122,7 +156,26 @@ def adamw(
 
     See :class:`~torch.optim.AdamW` for details.
     """
-    adam(params, grads, exp_avgs, exp_avg_sqs, max_exp_avg_sqs, state_steps, foreach=foreach,
-         capturable=capturable, differentiable=differentiable, fused=fused, grad_scale=grad_scale,
-         found_inf=found_inf, has_complex=has_complex, amsgrad=amsgrad, beta1=beta1, beta2=beta2,
-         lr=lr, weight_decay=weight_decay, eps=eps, maximize=maximize, decoupled_weight_decay=True)
+    adam(
+        params,
+        grads,
+        exp_avgs,
+        exp_avg_sqs,
+        max_exp_avg_sqs,
+        state_steps,
+        foreach=foreach,
+        capturable=capturable,
+        differentiable=differentiable,
+        fused=fused,
+        grad_scale=grad_scale,
+        found_inf=found_inf,
+        has_complex=has_complex,
+        amsgrad=amsgrad,
+        beta1=beta1,
+        beta2=beta2,
+        lr=lr,
+        weight_decay=weight_decay,
+        eps=eps,
+        maximize=maximize,
+        decoupled_weight_decay=True,
+    )

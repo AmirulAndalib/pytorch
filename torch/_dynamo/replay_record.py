@@ -1,81 +1,79 @@
 import dataclasses
 from dataclasses import field
-from types import CodeType, ModuleType
-from typing import Any, Dict
+from types import CellType, CodeType, ModuleType
+from typing import Any, BinaryIO, IO
+from typing_extensions import Self
 
-try:
-    import dill
-except ImportError:
-    dill = None
+from torch.utils._import_utils import import_dill
+
+
+dill = import_dill()
 
 
 @dataclasses.dataclass
 class ModuleRecord:
     module: ModuleType
-    accessed_attrs: Dict[str, Any] = field(default_factory=dict)
+    accessed_attrs: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclasses.dataclass
 class DummyModule:
     name: str
+    is_torch: bool = False
+
+    @property
+    def __name__(self) -> str:
+        return self.name
 
 
 @dataclasses.dataclass
 class ExecutionRecord:
     code: CodeType
-    globals: Dict[str, Any] = field(default_factory=dict)
-    locals: Dict[str, Any] = field(default_factory=dict)
-    builtins: Dict[str, Any] = field(default_factory=dict)
-    code_options: Dict[str, Any] = field(default_factory=dict)
+    closure: tuple[CellType]
+    globals: dict[str, Any] = field(default_factory=dict)
+    locals: dict[str, Any] = field(default_factory=dict)
+    builtins: dict[str, Any] = field(default_factory=dict)
+    code_options: dict[str, Any] = field(default_factory=dict)
 
-    def dump(self, f):
+    def dump(self, f: IO[str]) -> None:
         assert dill is not None, "replay_record requires `pip install dill`"
         dill.dump(self, f)
 
     @classmethod
-    def load(cls, f):
+    def load(cls, f: BinaryIO) -> Self:
         assert dill is not None, "replay_record requires `pip install dill`"
         return dill.load(f)
 
 
 @dataclasses.dataclass
 class ExecutionRecorder:
-    MOD_EXCLUDES = ["torch", "torch.fx", "torch.fx.passes"]
     LOCAL_MOD_PREFIX = "___local_mod_"
 
     code: CodeType
-    globals: Dict[str, Any] = field(default_factory=dict)
-    locals: Dict[str, Any] = field(default_factory=dict)
-    builtins: Dict[str, Any] = field(default_factory=dict)
-    code_options: Dict[str, Any] = field(default_factory=dict)
-    name_to_modrec: Dict[str, Any] = field(default_factory=dict)
+    closure: tuple[CellType]
+    globals: dict[str, Any] = field(default_factory=dict)
+    locals: dict[str, Any] = field(default_factory=dict)
+    builtins: dict[str, Any] = field(default_factory=dict)
+    code_options: dict[str, Any] = field(default_factory=dict)
+    name_to_modrec: dict[str, ModuleRecord] = field(default_factory=dict)
 
-    def add_local_var(self, name, var):
+    def add_local_var(self, name: str, var: Any) -> None:
         if isinstance(var, ModuleType):
-            if self._is_excl(var):
-                return
             self.locals[name] = self._add_mod(var)
         else:
             self.locals[name] = var
 
-    def add_global_var(self, name, var):
+    def add_global_var(self, name: str, var: Any) -> None:
         if isinstance(var, ModuleType):
-            if self._is_excl(var):
-                return
             self.globals[name] = self._add_mod(var)
         else:
             self.globals[name] = var
 
-    def add_local_mod(self, name, mod):
+    def add_local_mod(self, name: str, mod: ModuleType) -> None:
         assert isinstance(mod, ModuleType)
-        if self._is_excl(mod):
-            return
-
         self.add_global_var(name, mod)
 
-    def record_module_access(self, mod, name, val):
-        if self._is_excl(mod):
-            return
+    def record_module_access(self, mod: ModuleType, name: str, val: Any) -> None:
         if isinstance(val, ModuleType):
             self.name_to_modrec[mod.__name__].accessed_attrs[name] = self._add_mod(val)
             return
@@ -83,29 +81,25 @@ class ExecutionRecorder:
         if mod.__name__ in self.name_to_modrec:
             self.name_to_modrec[mod.__name__].accessed_attrs[name] = val
 
-    def get_record(self):
+    def get_record(self) -> ExecutionRecord:
         return ExecutionRecord(
             self.code,
+            self.closure,
             ExecutionRecorder._resolve_modules(self.globals),
             ExecutionRecorder._resolve_modules(self.locals),
             self.builtins.copy(),
             self.code_options.copy(),
         )
 
-    def _add_mod(self, mod):
+    def _add_mod(self, mod: ModuleType) -> ModuleRecord:
         if mod.__name__ not in self.name_to_modrec:
             self.name_to_modrec[mod.__name__] = ModuleRecord(mod)
 
         return self.name_to_modrec[mod.__name__]
 
     @classmethod
-    def _is_excl(cls, mod):
-        return any(mod.__name__ == excl for excl in cls.MOD_EXCLUDES)
-
-    # Convert ModuleRecords -> DummyModule tree
-    @classmethod
-    def _resolve_modules(cls, vars):
-        def resolve_module(var):
+    def _resolve_modules(cls, vars: dict[str, Any]) -> dict[str, Any]:
+        def resolve_module(var: Any) -> Any:
             if not isinstance(var, ModuleRecord):
                 return var
 

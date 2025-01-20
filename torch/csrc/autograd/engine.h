@@ -17,24 +17,18 @@
 
 #include <c10/util/CallOnce.h>
 
-#include <deque>
 #include <exception>
 #include <functional>
 #include <memory>
 #include <queue>
-#include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
-namespace torch {
-namespace autograd {
+namespace torch::autograd {
 struct ReadyQueue;
 }
-} // namespace torch
 
-namespace torch {
-namespace autograd {
+namespace torch::autograd {
 
 // Maximum reentrant backward depth before switching to a new thread
 // This limit is based on the TSAN's deadlock detector, where it will
@@ -47,6 +41,10 @@ static constexpr int MAX_DEPTH = 60;
 void set_device(int device);
 TORCH_API void validate_outputs(
     const edge_list& edges,
+    variable_list& grads,
+    const std::function<std::string(const std::string&)>& format_error);
+TORCH_API void validate_outputs(
+    const std::vector<std::optional<InputMetadata>>& input_metadata,
     variable_list& grads,
     const std::function<std::string(const std::string&)>& format_error);
 
@@ -187,7 +185,7 @@ struct TORCH_API Engine {
 
   void initialize_device_threads_pool();
   virtual void thread_on_exception(
-      std::shared_ptr<GraphTask> graph_task,
+      const std::shared_ptr<GraphTask>& graph_task,
       const std::shared_ptr<Node>& fn,
       std::exception& e);
 
@@ -232,9 +230,6 @@ struct TORCH_API Engine {
   void reentrant_thread_init();
   void add_thread_pool_task(const std::weak_ptr<GraphTask>& graph_task);
 
-  // Ensures device_ready_queues_ are initialized only once
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
-  c10::once_flag start_device_threads_flag_;
   // Safe to read device_ready_queues_ without synchronization after
   // initialization
   // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
@@ -291,5 +286,4 @@ struct TORCH_API Engine {
 using EngineStub = Engine& (*)();
 TORCH_API void set_default_engine_stub(EngineStub stub);
 
-} // namespace autograd
-} // namespace torch
+} // namespace torch::autograd

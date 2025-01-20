@@ -1,3 +1,4 @@
+# mypy: allow-untyped-defs
 import gc
 import sys
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -278,7 +279,6 @@ def create_graph(objects, *, context=None, filter=None):
             tidx = id_to_node.get(rid, None)
             if tidx is None:
                 continue
-            t = nodes[tidx]
             labels = references.get(rid, ["?"])
             node_referrers[tidx].append(fidx)
             for label in labels:
@@ -310,7 +310,7 @@ def escape(n):
 
 
 def is_cuda_tensor(obj):
-    return isinstance(obj, torch.Tensor) and obj.is_cuda
+    return isinstance(obj, torch.Tensor) and obj.is_cuda and not isinstance(obj, torch._subclasses.FakeTensor)
 
 def cuda_allocation_context():
     snapshot = torch.cuda.memory._snapshot()
@@ -319,7 +319,7 @@ def cuda_allocation_context():
         addr = seg['address']
         for blk in seg['blocks']:
             if blk['state'] == 'active_allocated':
-                frames, real_size = _block_extra(blk)
+                frames, _real_size = _block_extra(blk)
                 addr_to_frame[addr] = frames
             addr += blk['size']
 

@@ -2,12 +2,11 @@
 
 #pragma once
 
-#include <c10/util/Exception.h>
 #include <c10/util/TypeSafeSignMath.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <iterator>
-#include <limits>
 #include <type_traits>
 
 namespace c10 {

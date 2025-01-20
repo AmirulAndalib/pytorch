@@ -21,13 +21,8 @@
 
 namespace sdp {
 
-constexpr int32_t num_backends = 3;
-enum class SDPBackend {
-  error = -1,
-  math = 0,
-  flash_attention = 1,
-  efficient_attention = 2
-};
+constexpr int32_t num_backends = at::num_sdp_backends;
+using SDPBackend = at::SDPBackend;
 
 // Note that if this changed make sure to update
 // the templated enum in mem_eff/kernel_forward.h and mem_eff/kernel_backward.h
@@ -42,27 +37,21 @@ struct sdp_params {
   at::Tensor query;
   at::Tensor key;
   at::Tensor value;
-  c10::optional<at::Tensor> attn_mask;
+  std::optional<at::Tensor> attn_mask;
   double dropout;
   bool is_causal;
+  bool enable_gqa;
 };
 
 SDPBackend select_sdp_backend_cpp(sdp_params const& kernel_params);
 
 inline c10::SymFloat calculate_scale(
     const at::Tensor& query,
-    c10::optional<double> scale) {
+    std::optional<double> scale) {
   const auto softmax_scale = scale.has_value()
       ? scale.value()
       : (c10::SymFloat(1.0) / (c10::SymFloat(query.sym_size(-1)).sqrt()));
   return c10::SymFloat(softmax_scale);
-}
-
-// This helper function creates a constexpr std::array
-// From a compile time list of values
-template <typename V, typename... T>
-inline constexpr auto array_of(T&&... t) -> std::array<V, sizeof...(T)> {
-  return {{std::forward<T>(t)...}};
 }
 
 inline bool input_requires_grad(sdp_params const& params) {
@@ -120,7 +109,7 @@ inline bool try_broadcast_param_size(
     const c10::SymInt q_size,
     const c10::SymInt k_size,
     const c10::SymInt v_size,
-    c10::string_view param_name,
+    std::string_view param_name,
     bool debug) {
   auto max_size = std::max({q_size, k_size, v_size});
   if ((q_size != max_size && q_size != 1) ||
@@ -148,7 +137,7 @@ inline bool try_broadcast_param_size(
 
 inline bool check_for_seq_len_0_and_consistent_head_dim_nested_tensor_helper(
     at::Tensor const& param,
-    c10::string_view param_name,
+    std::string_view param_name,
     bool debug) {
   const auto nt_tensor_impl = at::native::get_nested_tensor_impl(param);
   const at::Tensor& sizes = nt_tensor_impl->get_nested_sizes();
@@ -269,11 +258,45 @@ inline bool check_requires_grad_and_nested(sdp_params const& params, bool debug)
 inline bool check_for_attn_mask(sdp_params const& params, bool debug) {
   if (params.attn_mask.has_value()) {
     if (debug) {
-      TORCH_WARN("Both fused kernels do not support non-null attn_mask.");
+      TORCH_WARN("Flash Attention does not support non-null attn_mask.");
     }
     return false;
   }
   return true;
+}
+
+inline bool check_attn_mask_shape(sdp_params const& params, bool debug) {
+  auto attn_mask = params.attn_mask;
+  if (!attn_mask.has_value()) {
+    return true;
+  }
+  if (attn_mask.value().requires_grad()) {
+    return false;
+  }
+  auto batchSize = params.query.sym_size(0);
+  auto qSize = params.query.sym_size(2);
+  auto kvSize = params.key.sym_size(2);
+  auto num_head = params.query.sym_size(1);
+  if (attn_mask.value().sym_size(-2) != qSize && attn_mask.value().sym_size(-2) != 1) {
+    return false;
+  }
+  if (attn_mask.value().sym_size(-1) != kvSize && attn_mask.value().sym_size(-1) != 1) {
+    return false;
+  }
+  if (attn_mask.value().dim() == 2) {
+    return true;
+  } else if (attn_mask.value().dim() == 4) {
+    if ((attn_mask.value().sym_size(0) == 1 || attn_mask.value().sym_size(0) == batchSize)
+        && (attn_mask.value().sym_size(1) == 1 || attn_mask.value().sym_size(1) == num_head)) {
+      return true;
+    }
+  }
+  if (debug) {
+    TORCH_WARN("Please use the following attn mask shapes: ",
+        "2d - ({Q_seq_len, 1}  x {KV_seq_len, 1}); ",
+        "4d - ({Batch, 1} x {Num_heads, 1} x {Q_seq_len, 1}  x {KV_seq_len, 1})");
+  }
+  return false;
 }
 
 inline bool check_tensor_shapes(sdp_params const& params, bool debug) {
@@ -282,7 +305,7 @@ inline bool check_tensor_shapes(sdp_params const& params, bool debug) {
         (query_dim == 4))) {
     if (debug) {
       TORCH_WARN(
-          "Both fused kernels requires query, key and value to be 4 dimensional, but got Query dim: ",
+          "All fused kernels requires query, key and value to be 4 dimensional, but got Query dim: ",
           query_dim,
           ", Key dim: ",
           params.key.dim(),
@@ -310,6 +333,46 @@ inline bool check_safe_kv_broadcast(at::Tensor const& param, bool debug) {
   return true;
 }
 
+inline bool check_grouped_query_attention(sdp_params const& params, bool debug) {
+  const auto q_num_heads = params.query.sym_size(-3);
+  const auto k_num_heads = params.key.sym_size(-3);
+  const auto v_num_heads = params.value.sym_size(-3);
+  const bool same_kv_heads = k_num_heads == v_num_heads;
+
+  if (!(same_kv_heads)){
+    if (debug) {
+      TORCH_WARN(
+          "Both fused kernels require key and value to have the same num_heads and batch_size but got: ",
+          "Key sizes: ",
+          params.key.sizes(),
+          ", Value sizes: ",
+          params.value.sizes(),
+          ", Query sizes: ",
+          params.query.sizes(),
+          " instead.");
+    }
+    return false;
+  }
+  // Check if grouped query attention is supported and validate the number of
+  // heads
+  if (q_num_heads % k_num_heads != 0) {
+    if (debug) {
+      TORCH_WARN(
+          "FlashAttentionV2 only supports grouped query attention, where the number of heads in key/value must divide number of heads in query.",
+          "Got input Key sizes(): ",
+          params.key.sym_size(-3),
+          ", Value sizes(): ",
+          params.value.sym_size(-3),
+          ", Query sizes(): ",
+          params.query.sym_size(-3),
+          " instead.");
+    }
+    return false;
+  }
+  return true;
+}
+
+template <bool supports_gqa>
 inline bool check_batch_size_and_num_heads_dense(sdp_params const& params, bool debug) {
   // This is expected to be called after check_tensor_shapes ensuring that the
   // size() calls won't error since the inputs are all 4 dimensional
@@ -321,16 +384,36 @@ inline bool check_batch_size_and_num_heads_dense(sdp_params const& params, bool 
   bool same_batch_size =
       q_batch_size == k_batch_size && q_batch_size == v_batch_size;
 
-  auto q_num_heads = params.query.sym_size(1);
-  auto k_num_heads = params.key.sym_size(1);
-  auto v_num_heads = params.value.sym_size(1);
+  auto q_num_heads = params.query.sym_size(-3);
+  auto k_num_heads = params.key.sym_size(-3);
+  auto v_num_heads = params.value.sym_size(-3);
+
   bool same_num_heads =
       q_num_heads == k_num_heads && q_num_heads == v_num_heads;
 
-  if (!(same_batch_size && same_num_heads)) {
+  if (!same_batch_size){
+    if(debug) {
+      TORCH_WARN(
+          "For dense inputs, both fused kernels require query, key and value to have the same batch_size. ",
+          "Query.sizes(): ",
+          params.query.sizes(),
+          ", Key.sizes(): ",
+          params.key.sizes(),
+          ", Value.sizes(): ",
+          params.value.sizes(),
+          " instead. To broadcast dense inputs, try using unsqueeze and expand_to before passing them into the kernel.");
+    }
+    return false;
+  }
+
+  if(params.enable_gqa && supports_gqa){
+    return check_grouped_query_attention(params, debug);
+  }
+
+  if (!same_num_heads){
     if (debug) {
       TORCH_WARN(
-          "For dense inputs, both fused kernels require query, key and value to have the same batch_size and num_heads. ",
+          "For dense input, both fused kernels require query, key and value to have the same num_heads. ",
           "Query.sizes(): ",
           params.query.sizes(),
           ", Key sizes(): ",
@@ -341,6 +424,7 @@ inline bool check_batch_size_and_num_heads_dense(sdp_params const& params, bool 
     }
     return false;
   }
+  // If all checks pass, return true
   return true;
 }
 
@@ -394,13 +478,14 @@ inline bool check_nonzero_sequence_lengths_dense(sdp_params const& params, bool 
   if (zero_seq_len_q || zero_seq_len_k) {
     if (debug) {
       TORCH_WARN(
-          "Both fused kernels do not support zero seq_len_q or seq_len_kv.");
+          "All fused kernels do not support zero seq_len_q or seq_len_kv.");
     }
     return false;
   }
   return true;
 }
 
+template<bool ignore_singleton_dim>
 inline bool check_last_dim_stride_equals_1_dense(sdp_params const& params, bool debug) {
   // The stride checking for NestedTensors is done within the kernel
   // And .contiguous will be called if needed
@@ -409,6 +494,13 @@ inline bool check_last_dim_stride_equals_1_dense(sdp_params const& params, bool 
   // fused_attention have stride 1
   bool qkv_strides_equal_1 = params.query.sym_stride(-1) == 1 &&
       params.key.sym_stride(-1) == 1 && params.value.sym_stride(-1) == 1;
+
+  // https://github.com/pytorch/pytorch/issues/116333
+  // If the head_dim is size 1 the stride won't matter, but we
+  // check this condition before padding the head_dim to 1
+  if (ignore_singleton_dim){
+    qkv_strides_equal_1 = qkv_strides_equal_1 || params.query.sym_size(-1) == 1;
+  }
   bool mask_stride_equal_1 = params.attn_mask.has_value()
       ? params.attn_mask.value().sym_stride(-1) == 1
       : true;
@@ -421,7 +513,7 @@ inline bool check_last_dim_stride_equals_1_dense(sdp_params const& params, bool 
       }
       epilogue_message << " instead.";
       TORCH_WARN(
-          "Both fused kernels require the last dimension of the input to have stride 1. ",
+          "All fused kernels require the last dimension of the input to have stride 1. ",
           "Got Query.stride(-1): ",
           params.query.sym_stride(-1),
           ", Key.stride(-1): ",
