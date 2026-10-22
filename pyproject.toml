@@ -315,7 +315,7 @@ dev = [
     # after which this can be removed as it is already specified in the
     # [build-system] section
     "scikit-build-core>=1.0",
-    "setuptools>=77.0.0,<82",  # 77.0 is the first release with PEP 639 license-files support
+    "setuptools>=77.0.0,<85",  # 77.0 is the first release with PEP 639 license-files support
     "spin",
     "cmake>=3.27",
     "ninja",

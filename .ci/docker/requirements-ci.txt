@@ -175,7 +175,7 @@ optree==0.17.0 ; python_version >= "3.14"
 #test_pointwise_ops.py, test_dtensor_ops.py, test_torchinductor.py, test_fx.py,
 #test_fake_tensor.py, test_mps.py
 
-pillow==12.3.0
+pillow==13.0.0
 #Description:  Python Imaging Library fork
 #Pinned versions: 11.0.0
 #test that import:
@@ -190,7 +190,7 @@ psutil
 #Pinned versions:
 #test that import: test_profiler.py, test_openmp.py, test_dataloader.py
 
-pytest==7.3.2
+pytest==9.1.1
 #Description: testing framework
 #Pinned versions:
 #test that import: test_typing.py, test_cpp_extensions_aot.py, run_test.py
@@ -359,7 +359,7 @@ sympy==1.13.3
 #Pinned versions:
 #test that import:
 
-onnx==1.21.0
+onnx==1.22.0rc1
 #Description: Required by the torch.onnx exporter
 #Pinned versions:
 #test that import:
@@ -389,10 +389,10 @@ pwlf==2.2.1
 #test that import: test_sac_estimator.py
 
 # To build PyTorch itself
-pip==26.1.2
+pip==26.2
 pyyaml==6.0.3
 pyzstd
-setuptools==78.1.1
+setuptools==83.0.0
 packaging==24.2
 six
 
@@ -439,7 +439,7 @@ tqdm>=4.66.0
 #Description: progress bar library required for dynamo benchmarks
 #test that import: benchmarks/dynamo/*
 
-aiohttp==3.14.3
+aiohttp==3.14.4
 #Description: required for torch.distributed.debug
 
 spin==0.17
